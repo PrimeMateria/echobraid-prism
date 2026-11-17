@@ -1,0 +1,342 @@
+# Publishes the repository's app page: `site/` with the holo that `just app`
+# builds and verifies through the locked SDK. Project content, not universal
+# policy: a repository may extend or replace it.
+#
+# It runs on every push to main, beside `bootstrap`, not after it: `just app`
+# is the proof-bearing build (the Lean kernel checks every theorem before the
+# holo exists), so the page goes live as soon as that passes, while the rest of
+# the gate runs on both architectures. The SDK step and the signing step are
+# the ones `build.yml` runs, copied here: the gate pins every `uses:` to a
+# commit and so forbids calling a workflow by path. When `build.yml` changes
+# either step, copy it again. The page then carries the same holo that
+# `prism-code build --remote github` would hand a device, with the signed
+# provenance of the run that made it beside it.
+name: pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run per ref at a time: main's runs publish in order, and a run
+# dispatched on a work branch verifies every example without waiting behind
+# main or being dropped by it.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  examples:
+    name: list the builder's examples
+    if: github.repository != 'UOR-Foundation/template'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      names: ${{ steps.list.outputs.names }}
+    steps:
+      - name: Check out the exact event revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Read examples/gallery.json
+        id: list
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "names=$(node builder/cli.mjs list)" >>"$GITHUB_OUTPUT"
+
+  example:
+    # DR-11: every example is built from its prompt into a repository created
+    # from UOR-Foundation/template at the commit frame.lock pins, and that
+    # instance's own acceptance gate, `just vv`, passes in the locked SDK: the
+    # Lean kernel checks every theorem and the guest replays every acceptance
+    # vector before the example's page offers its holo.
+    name: build ${{ matrix.example }} from its prompt and pass the template gate
+    needs: examples
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        example: ${{ fromJSON(needs.examples.outputs.names) }}
+    steps:
+      - name: Check out the exact event revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Write the app into a template instance
+        shell: bash
+        env:
+          EXAMPLE: ${{ matrix.example }}
+        run: |
+          set -euo pipefail
+          field() { node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("frame.lock", "utf8")).source[process.argv[1]])' "$1"; }
+          instance="$RUNNER_TEMP/instance"
+          git init -q "$instance"
+          git -C "$instance" fetch -q --depth 1 "https://github.com/$(field repository)" "$(field commit)"
+          git -C "$instance" checkout -q --detach FETCH_HEAD
+          test "$(git -C "$instance" rev-parse HEAD)" = "$(field commit)"
+          node builder/cli.mjs build "examples/$EXAMPLE.prompt.json" --out "$instance"
+          echo "instance=$instance" >>"$GITHUB_ENV"
+      - name: Pass the instance's gate through the locked SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          image=$(sed -n 's/.*"sdk_image":"\([^"]*\)".*/\1/p' prismpm.lock)
+          if [[ ! $image =~ ^[a-z0-9.-]+(:[0-9]{1,5})?/[a-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]]; then
+            printf '%s\n' 'prismpm.lock does not select an immutable SDK image' >&2
+            exit 64
+          fi
+          docker_config=$(mktemp -d)
+          # The SDK's /tmp is a private directory on the runner's own disk, so the
+          # build's scratch space is bounded by the disk the runner has, not by a
+          # fixed size; it is removed with the credentials when the step ends.
+          scratch=$(mktemp -d)
+          mkdir -p "$scratch/prismpm-home/.docker"
+          trap 'rm -rf "$docker_config" "$scratch"' EXIT
+          printf '{}\n' >"$docker_config/config.json"
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --group-add "$(stat -c '%g' /var/run/docker.sock)" \
+            --volume "$scratch:/tmp" \
+            --volume "$instance:$instance" \
+            --volume /var/run/docker.sock:/var/run/docker.sock \
+            --volume "$docker_config:/tmp/prismpm-home/.docker:ro" \
+            --workdir "$instance" \
+            --env DOCKER_CONFIG=/tmp/prismpm-home/.docker \
+            --env BUILDX_CONFIG=/tmp/prismpm-buildx \
+            --env HOME=/tmp/prismpm-home \
+            --env PRISMPM_EPHEMERAL_HOME=1 \
+            "$image" just vv
+      - name: Collect the verified holo and its rendered design views
+        shell: bash
+        env:
+          EXAMPLE: ${{ matrix.example }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          holos=("$instance"/app/.prism/build/*/*.holo)
+          if [[ ${#holos[@]} -ne 1 ]]; then
+            printf 'expected one holo, found %d\n' "${#holos[@]}" >&2
+            exit 64
+          fi
+          build=$(dirname "${holos[0]}")
+          out="$RUNNER_TEMP/built/$EXAMPLE"
+          mkdir -p "$out"
+          cp "${holos[0]}" "$out/app.holo"
+          cp "$build/application/holo-identities.json" "$out/"
+          cp -r "$build/design" "$out/design"
+          echo "built=$RUNNER_TEMP/built" >>"$GITHUB_ENV"
+      - name: Keep it for the page
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: example-${{ matrix.example }}
+          path: ${{ env.built }}
+          if-no-files-found: error
+
+  build:
+    name: build and verify the holo, sign its provenance, assemble the page
+    # The template repository publishes its try page instead (try-page.yml).
+    if: github.repository != 'UOR-Foundation/template'
+    needs: example
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out the exact event revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check the brand and the frame against brand.lock and frame.lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          node bootstrap/brand-sync.mjs --check
+          python3 -I bootstrap/brand-fonts.py --check
+          node bootstrap/frame-sync.mjs --check
+      - name: Regenerate the DevRel catalog from the pinned subjects and write the case studies
+        # devrel/subjects.json pins each subject's repository, full commit and
+        # project path; the self subject is this repository at the commit
+        # being built. scripts/subjects.sh fetches every pinned subject at
+        # exactly its commit. The committed app/src/Catalog.lex.tex must be the
+        # catalog of exactly those commits (DR-03); the case studies under
+        # site/case-studies/, the facet pages under site/facets/, the
+        # redirects from the old site/learn/ addresses, their Markdown twins,
+        # llms.txt and feed.xml are generated here and never committed.
+        shell: bash
+        run: |
+          set -euo pipefail
+          checkouts=$(scripts/subjects.sh "$RUNNER_TEMP/subjects")
+          cargo run -q --locked -p devrel-catalog -- \
+            --subjects devrel/subjects.json --checkouts "$checkouts" \
+            --self-root "$PWD" --self-commit "$GITHUB_SHA" \
+            --lean app/src/Catalog.lex.tex --check --site site
+      - name: Fetch every example's verified build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: example-*
+          path: ${{ runner.temp }}/built
+          merge-multiple: true
+      - name: Write the start page, the builder and the example pages
+        # Every example in examples/gallery.json gets a page from its prompt,
+        # with the holo the example job verified; the builder runs in the
+        # browser from site/builder/ (DR-13).
+        shell: bash
+        run: |
+          set -euo pipefail
+          node builder/pack.mjs --check
+          node builder/site.mjs --site site --built "$RUNNER_TEMP/built"
+      - name: Build and verify the holo through the locked SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          image=$(sed -n 's/.*"sdk_image":"\([^"]*\)".*/\1/p' prismpm.lock)
+          if [[ ! $image =~ ^[a-z0-9.-]+(:[0-9]{1,5})?/[a-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]]; then
+            printf '%s\n' 'prismpm.lock does not select an immutable SDK image' >&2
+            exit 64
+          fi
+          docker_config=$(mktemp -d)
+          # The SDK's /tmp is a private directory on the runner's own disk, so the
+          # build's scratch space is bounded by the disk the runner has, not by a
+          # fixed size; it is removed with the credentials when the step ends.
+          scratch=$(mktemp -d)
+          mkdir -p "$scratch/prismpm-home/.docker"
+          trap 'rm -rf "$docker_config" "$scratch"' EXIT
+          printf '{}\n' >"$docker_config/config.json"
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --group-add "$(stat -c '%g' /var/run/docker.sock)" \
+            --volume "$scratch:/tmp" \
+            --volume "$PWD:$PWD" \
+            --volume /var/run/docker.sock:/var/run/docker.sock \
+            --volume "$docker_config:/tmp/prismpm-home/.docker:ro" \
+            --workdir "$PWD" \
+            --env DOCKER_CONFIG=/tmp/prismpm-home/.docker \
+            --env BUILDX_CONFIG=/tmp/prismpm-buildx \
+            --env HOME=/tmp/prismpm-home \
+            --env PRISMPM_EPHEMERAL_HOME=1 \
+            "$image" just app
+      - name: Find the holo
+        id: holo
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          holos=(app/.prism/build/*/*.holo)
+          if [[ ${#holos[@]} -ne 1 ]]; then
+            printf 'expected one holo, found %d\n' "${#holos[@]}" >&2
+            exit 64
+          fi
+          fingerprint=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).archive_fingerprint)' "$(dirname "${holos[0]}")/application/holo-identities.json")
+          {
+            echo "path=${holos[0]}"
+            echo "fingerprint=$fingerprint"
+          } >>"$GITHUB_OUTPUT"
+      - name: Sign the holo's provenance as this repository's workflow
+        id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.holo.outputs.path }}
+          show-summary: false
+      - name: Draw the social image and the icons for this app.json
+        # page.mjs refuses an og.png or icon not drawn for this app.json. Drawing
+        # them here, with Pillow pinned by hash, means a new app needs neither
+        # Python nor Pillow on its author's machine; the committed images only
+        # serve a local preview.
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/draw"
+          "$RUNNER_TEMP/draw/bin/pip" install --quiet --no-deps --only-binary :all: --require-hashes -r bootstrap/draw-requirements.txt
+          "$RUNNER_TEMP/draw/bin/python" -I bootstrap/og.py
+          "$RUNNER_TEMP/draw/bin/python" -I bootstrap/icons.py
+      - name: Assemble the page
+        shell: bash
+        env:
+          HOLO: ${{ steps.holo.outputs.path }}
+          FINGERPRINT: ${{ steps.holo.outputs.fingerprint }}
+          ATTESTATION_URL: ${{ steps.attest.outputs.attestation-url }}
+        run: |
+          set -euo pipefail
+          cp "$HOLO" site/app.holo
+          cp -r try/vendor site/vendor
+          rm -rf site/vendor/prism-code/fixtures
+          # The page says where this holo's provenance is: the signed statement
+          # GitHub keeps for the build that made it.
+          node -e '
+            const { readFileSync, writeFileSync } = require("node:fs");
+            const [id, url] = process.argv.slice(1);
+            const app = JSON.parse(readFileSync("site/app.json", "utf8"));
+            app.attestations ??= {};
+            app.attestations.build = { id, url };
+            writeFileSync("site/app.json", `${JSON.stringify(app, null, 2)}\n`);
+          ' "$FINGERPRINT" "$ATTESTATION_URL"
+          node bootstrap/page.mjs site
+          # One header, navigation and footer for every documentation page,
+          # the docs hub, llms.txt by type and sitemap.xml; refuses a page
+          # with no Diátaxis type or journey stage and any link that lands
+          # nowhere (devrel/shell.mjs).
+          node devrel/shell.mjs site
+          # The content standard (scripts/content/standard.json): draw every
+          # figure from its data, add each page's guide, mark defined terms,
+          # fold long blocks and add structured data, then measure every rule
+          # on every page in Chromium and refuse the site on any fault. The
+          # measurements ship as content-report.json.
+          npm install --no-audit --no-fund --global playwright@1.56.1
+          playwright install --with-deps chromium
+          node scripts/content/enrich.mjs site
+          node scripts/content/check.mjs site
+          node bootstrap/precache.mjs site
+      - name: Lighthouse at 100 on mobile, before anything is deployed
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --no-audit --no-fund --global @lhci/cli@0.15.1
+          lhci autorun --config=lighthouserc.json
+      - name: Every Material 3 window size class, both themes, before anything is deployed
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --no-audit --no-fund --global playwright@1.56.1
+          playwright install --with-deps chromium
+          node bootstrap/screens.mjs site screens
+      - name: Keep the screens
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: screens
+          path: screens
+          if-no-files-found: ignore
+      - name: Configure Pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b
+      - name: Upload the page
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa
+        with:
+          path: site
+
+  deploy:
+    name: publish the page
+    # Only main publishes; a dispatch on another branch stops at the verified build.
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e

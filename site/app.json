@@ -1,0 +1,90 @@
+{
+  "name": "EchoBraid",
+  "shortName": "EchoBraid",
+  "live": "https://multiplic.github.io/echobraid-prism/",
+  "purpose": "ASD-aligned, neurodivergent-affirming software for personalized learning, sensory empowerment, and verified cognitive scaffolding.",
+  "inputLabel": "Universal Observation or Query",
+  "placeholder": "0",
+  "submitLabel": "Evaluate",
+  "outputLabel": "Verified Contract & Axiom Output",
+  "answers": {
+    "positive": [
+      "conformant *"
+    ],
+    "negative": [
+      "drifted *"
+    ],
+    "refusal": "error invalid-request"
+  },
+  "promise": {
+    "headline": "Formal proof and provenance carried directly within the .holo package.",
+    "detail": "Every feature, boundary contract, and behavioral assertion is proved by the Lean kernel and replayed deterministically via PrismPM and LexLean."
+  },
+  "claim": "TC-01: The checker answers conformant exactly when every universal policy file's observed digest equals its locked digest.",
+  "proposition": {
+    "name": "conformant_decides",
+    "text": "conformant_decides observation :=\n  (((conformant observation) = true) <-> (Conformant observation))",
+    "plain": "The contract checker verdict is true if and only if all policy files strictly match their locked cryptographic digests."
+  },
+  "theorems": [
+    {
+      "name": "conformant_decides",
+      "statement": "(((conformant observation) = true) <-> (Conformant observation))",
+      "how": "Decided by the Lean kernel over the generated model during prismpm verify",
+      "where": "app/src/Contract.lex.tex"
+    }
+  ],
+  "pinned": [
+    {
+      "name": "contract_tc_01",
+      "what": "The theorem exact statement, axioms, and policy bounds verified by the conformance gate.",
+      "where": "crates/conformance/tests/contract.rs"
+    }
+  ],
+  "trusted": [
+    {
+      "name": "SDK image",
+      "value": "ghcr.io/uor-foundation/prismpm-sdk-candidate@sha256:cd3b47d7a370c4a26b8285f5e9c3bb15e639973c55505c3809ddbe55352fea58"
+    },
+    {
+      "name": "Lean toolchain",
+      "value": "leanprover/lean4:v4.32.1"
+    },
+    {
+      "name": "Rust toolchain",
+      "value": "1.97.1"
+    },
+    {
+      "name": "PrismPM version",
+      "value": "0.4.0"
+    },
+    {
+      "name": "Your browser",
+      "value": "runs the WebAssembly guest and this page"
+    }
+  ],
+  "attestations": {
+    "proof": {
+      "id": "kernel-checked by prismpm verify in CI gate",
+      "url": "https://github.com/multiplic/echobraid-prism/actions/workflows/bootstrap.yml"
+    },
+    "build": {
+      "id": "signed by actions/attest-build-provenance",
+      "url": "https://github.com/multiplic/echobraid-prism/actions/workflows/build.yml"
+    }
+  },
+  "repository": "https://github.com/multiplic/echobraid-prism",
+  "report": "https://github.com/multiplic/echobraid-prism/blob/main/CONFORMANCE.md",
+  "tagline": "EchoBraid: Verified Neurodivergent Learning Systems & Universal Logic Architecture",
+  "hint": "Explore the verified holographic application or interact with the GUI interface.",
+  "links": [
+    {
+      "label": "EchoBraid GUI",
+      "href": "./gui/"
+    },
+    {
+      "label": "Conformance",
+      "href": "./CONFORMANCE.md"
+    }
+  ]
+}
